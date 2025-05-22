@@ -192,6 +192,262 @@ class TestMain:
 
     #  Tests the creation of a log file in improve mode.
 
+# Helper for default preprompt strings if not found by PrepromptsHolder mock
+DEFAULT_CLARIFY_INITIAL_PROMPT = (
+    "You are an AI assistant. The user has provided an initial prompt. "
+    "Review it. If it's clear and actionable for code generation, respond with the exact phrase 'READY_TO_GENERATE'. "
+    "Otherwise, ask a single, concise question to clarify the most critical ambiguity or missing piece of information. "
+    "Do not offer to write code yet."
+)
+DEFAULT_CLARIFY_NEXT_STEP_PROMPT = (
+    "You are an AI assistant. You have been in a dialogue to clarify software requirements. "
+    "Review the entire conversation. If all critical ambiguities are resolved and you have "
+    "enough information to generate the code, respond with the exact phrase 'READY_TO_GENERATE'. "
+    "Otherwise, formulate the *next single most important* clarifying question to ask the user. "
+    "Do not offer to write code yet."
+)
+DEFAULT_PHILOSOPHY_PROMPT = "This is the default philosophy prompt."
+
+
+class TestClarifyMode:
+    project_path_string = "projects/clarify_test"
+
+    def _run_main_with_clarify_mocks(
+        self,
+        tmp_path,
+        mock_ai_next,
+        mock_input,
+        mock_print,
+        mock_preprompts,
+        mock_agent_class,
+        initial_prompt_content="Test prompt for clarification",
+    ):
+        p = tmp_path / self.project_path_string
+        p.mkdir(parents=True, exist_ok=True)
+        (p / "prompt").write_text(initial_prompt_content)
+
+        # Configure PrepromptsHolder mock
+        def get_preprompt_side_effect(key):
+            if key == "clarify_initial_prompt":
+                return DEFAULT_CLARIFY_INITIAL_PROMPT
+            elif key == "clarify_next_step_or_ready":
+                return DEFAULT_CLARIFY_NEXT_STEP_PROMPT
+            elif key == "philosophy":
+                return DEFAULT_PHILOSOPHY_PROMPT
+            # Add other preprompts if main() tries to load them before clarification
+            return f"Content for {key}" 
+        mock_preprompts.return_value.get_preprompt.side_effect = get_preprompt_side_effect
+
+        args = DefaultArgumentsMain(
+            str(p),
+            clarify_mode=True,
+            model="gpt-4-test", # Using a distinct model for easier mocking if needed
+            no_execution=True, # Important to prevent actual agent execution beyond init
+        )
+        
+        # We expect typer.Exit for "quit"
+        if "quit" in mock_input.side_effect if callable(mock_input.side_effect) else []:
+             with pytest.raises(typer.Exit):
+                args()
+        else:
+            args()
+        
+        return mock_agent_class.return_value # Return the mocked agent instance
+
+    @patch("gpt_engineer.applications.cli.main.CliAgent")
+    @patch("gpt_engineer.applications.cli.main.PrepromptsHolder")
+    @patch("builtins.print")
+    @patch("builtins.input")
+    @patch("gpt_engineer.core.ai.AI.next") # Patching AI.next directly
+    def test_basic_clarification_loop(
+        self, mock_ai_next_method, mock_input, mock_print, mock_preprompts, mock_agent_class, tmp_path
+    ):
+        initial_prompt = "Build a web app."
+        q1 = "What framework for the web app?"
+        a1 = "React"
+        q2 = "What about backend?"
+        a2 = "Node.js"
+
+        # Simulate AI responses
+        # Using AIMessage from langchain.schema as that's what AI.next appends
+        from langchain.schema import AIMessage, HumanMessage, SystemMessage
+        mock_ai_next_method.side_effect = [
+            # First call (initial prompt results in q1)
+            [SystemMessage(content=DEFAULT_PHILOSOPHY_PROMPT), HumanMessage(content=initial_prompt), AIMessage(content=q1)],
+            # Second call (after user answers a1, AI asks q2)
+            [SystemMessage(content=DEFAULT_PHILOSOPHY_PROMPT), HumanMessage(content=initial_prompt), AIMessage(content=q1), HumanMessage(content=a1), AIMessage(content=q2)],
+            # Third call (after user answers a2, AI is ready)
+            [SystemMessage(content=DEFAULT_PHILOSOPHY_PROMPT), HumanMessage(content=initial_prompt), AIMessage(content=q1), HumanMessage(content=a1), AIMessage(content=q2), HumanMessage(content=a2), AIMessage(content="READY_TO_GENERATE")],
+        ]
+        mock_input.side_effect = [a1, a2]
+
+        agent_instance = self._run_main_with_clarify_mocks(
+            tmp_path, mock_ai_next_method, mock_input, mock_print, mock_preprompts, mock_agent_class, initial_prompt_content=initial_prompt
+        )
+
+        # Assertions for print (AI questions)
+        # Note: print calls are many, check for specific AI questions
+        printed_texts = " ".join(call_args[0][0] for call_args in mock_print.call_args_list if call_args[0])
+        assert q1 in printed_texts
+        assert q2 in printed_texts
+
+        # Assert agent.init call
+        agent_instance.init.assert_called_once()
+        called_prompt_arg = agent_instance.init.call_args[0][0]
+        assert isinstance(called_prompt_arg, Prompt)
+        
+        # Check that the final prompt text contains the dialogue
+        assert f"Original Prompt:\n{initial_prompt}" in called_prompt_arg.text
+        assert f"AI: {q1}" in called_prompt_arg.text
+        assert f"User: {a1}" in called_prompt_arg.text
+        assert f"AI: {q2}" in called_prompt_arg.text
+        assert f"User: {a2}" in called_prompt_arg.text
+        assert "READY_TO_GENERATE" in called_prompt_arg.text # The signal itself might be part of the last AI message
+
+        # Assert code_gen_fn is gen_code
+        assert agent_instance.code_gen_fn.__name__ == "gen_code"
+
+    @patch("gpt_engineer.applications.cli.main.CliAgent")
+    @patch("gpt_engineer.applications.cli.main.PrepromptsHolder")
+    @patch("builtins.print")
+    @patch("builtins.input")
+    @patch("gpt_engineer.core.ai.AI.next")
+    def test_done_keyword(
+        self, mock_ai_next_method, mock_input, mock_print, mock_preprompts, mock_agent_class, tmp_path
+    ):
+        initial_prompt = "Build a calculator."
+        q1 = "What operations?"
+        
+        from langchain.schema import AIMessage, HumanMessage, SystemMessage
+        mock_ai_next_method.return_value = [ # Only one AI interaction needed
+             SystemMessage(content=DEFAULT_PHILOSOPHY_PROMPT), HumanMessage(content=initial_prompt), AIMessage(content=q1)
+        ]
+        mock_input.return_value = "done" # User types 'done'
+
+        agent_instance = self._run_main_with_clarify_mocks(
+            tmp_path, mock_ai_next_method, mock_input, mock_print, mock_preprompts, mock_agent_class, initial_prompt_content=initial_prompt
+        )
+        
+        printed_texts = " ".join(call_args[0][0] for call_args in mock_print.call_args_list if call_args[0])
+        assert q1 in printed_texts # AI asks its question
+
+        agent_instance.init.assert_called_once()
+        called_prompt_arg = agent_instance.init.call_args[0][0]
+        assert f"Original Prompt:\n{initial_prompt}" in called_prompt_arg.text
+        assert f"AI: {q1}" in called_prompt_arg.text # Dialogue includes the AI's question
+        # User's "done" is not added to history for prompt generation
+        assert "User: done" not in called_prompt_arg.text 
+        assert agent_instance.code_gen_fn.__name__ == "gen_code"
+
+    @patch("gpt_engineer.applications.cli.main.CliAgent")
+    @patch("gpt_engineer.applications.cli.main.PrepromptsHolder")
+    @patch("builtins.print")
+    @patch("builtins.input")
+    @patch("gpt_engineer.core.ai.AI.next")
+    def test_quit_keyword(
+        self, mock_ai_next_method, mock_input, mock_print, mock_preprompts, mock_agent_class, tmp_path
+    ):
+        initial_prompt = "Build something."
+        q1 = "Like what?"
+
+        from langchain.schema import AIMessage, HumanMessage, SystemMessage
+        mock_ai_next_method.return_value = [
+            SystemMessage(content=DEFAULT_PHILOSOPHY_PROMPT), HumanMessage(content=initial_prompt), AIMessage(content=q1)
+        ]
+        mock_input.return_value = "quit"
+
+        # Expect typer.Exit due to "quit"
+        with pytest.raises(typer.Exit):
+            self._run_main_with_clarify_mocks(
+                tmp_path, mock_ai_next_method, mock_input, mock_print, mock_preprompts, mock_agent_class, initial_prompt_content=initial_prompt
+            )
+        
+        agent_instance = mock_agent_class.return_value
+        agent_instance.init.assert_not_called() # Agent init should not be called
+
+    @patch("gpt_engineer.applications.cli.main.CliAgent")
+    @patch("gpt_engineer.applications.cli.main.PrepromptsHolder")
+    @patch("builtins.print")
+    @patch("builtins.input")
+    @patch("gpt_engineer.core.ai.AI.next")
+    def test_max_turns_reached(
+        self, mock_ai_next_method, mock_input, mock_print, mock_preprompts, mock_agent_class, tmp_path
+    ):
+        initial_prompt = "Complex app."
+        max_turns = 7 # As defined in main.py
+        
+        from langchain.schema import AIMessage, HumanMessage, SystemMessage
+        
+        # AI always asks a question
+        ai_responses = []
+        current_history = [SystemMessage(content=DEFAULT_PHILOSOPHY_PROMPT), HumanMessage(content=initial_prompt)]
+        for i in range(max_turns):
+            question = f"Question {i+1}"
+            current_history.append(AIMessage(content=question))
+            ai_responses.append(list(current_history)) # AI.next returns the whole history + new AI message
+            if i < max_turns -1: # For all but the last input
+                 current_history.append(HumanMessage(content=f"Answer {i+1}"))
+
+
+        mock_ai_next_method.side_effect = ai_responses
+        mock_input.side_effect = [f"Answer {i+1}" for i in range(max_turns)]
+
+        agent_instance = self._run_main_with_clarify_mocks(
+            tmp_path, mock_ai_next_method, mock_input, mock_print, mock_preprompts, mock_agent_class, initial_prompt_content=initial_prompt
+        )
+
+        # Check that all questions were asked
+        printed_texts = "".join(call_args[0][0] for call_args in mock_print.call_args_list if call_args[0])
+        for i in range(max_turns):
+            assert f"Question {i+1}" in printed_texts
+        
+        # Check that "Max clarification turns reached" was printed
+        assert "Max clarification turns reached" in printed_texts
+
+        agent_instance.init.assert_called_once()
+        called_prompt_arg = agent_instance.init.call_args[0][0]
+        assert f"Original Prompt:\n{initial_prompt}" in called_prompt_arg.text
+        for i in range(max_turns):
+            assert f"AI: Question {i+1}" in called_prompt_arg.text
+            if i < max_turns: # All answers should be there
+                 assert f"User: Answer {i+1}" in called_prompt_arg.text
+        assert agent_instance.code_gen_fn.__name__ == "gen_code"
+
+    @patch("gpt_engineer.applications.cli.main.CliAgent")
+    @patch("gpt_engineer.applications.cli.main.PrepromptsHolder")
+    @patch("builtins.print")
+    @patch("builtins.input")
+    @patch("gpt_engineer.core.ai.AI.next")
+    def test_ai_ready_immediately(
+        self, mock_ai_next_method, mock_input, mock_print, mock_preprompts, mock_agent_class, tmp_path
+    ):
+        initial_prompt = "Simple script."
+
+        from langchain.schema import AIMessage, HumanMessage, SystemMessage
+        mock_ai_next_method.return_value = [
+            SystemMessage(content=DEFAULT_PHILOSOPHY_PROMPT), HumanMessage(content=initial_prompt), AIMessage(content="READY_TO_GENERATE")
+        ]
+        # mock_input should not be called
+
+        agent_instance = self._run_main_with_clarify_mocks(
+            tmp_path, mock_ai_next_method, mock_input, mock_print, mock_preprompts, mock_agent_class, initial_prompt_content=initial_prompt
+        )
+        
+        mock_input.assert_not_called() # No user input needed
+
+        # Check that "AI is ready to generate code." was printed
+        printed_texts = "".join(call_args[0][0] for call_args in mock_print.call_args_list if call_args[0])
+        assert "AI is ready to generate code." in printed_texts
+
+        agent_instance.init.assert_called_once()
+        called_prompt_arg = agent_instance.init.call_args[0][0]
+        # Prompt should be the original prompt + the READY_TO_GENERATE signal as part of AI message
+        assert f"Original Prompt:\n{initial_prompt}" in called_prompt_arg.text
+        assert "READY_TO_GENERATE" in called_prompt_arg.text 
+        # No clarification questions or answers should be in the prompt
+        assert "AI: " not in called_prompt_arg.text.split("Clarification Dialogue:")[1].split("READY_TO_GENERATE")[0] # Check between dialogue start and ready signal
+        assert agent_instance.code_gen_fn.__name__ == "gen_code"
+
 
 class TestLoadPrompt:
     #  Load prompt from existing file in input_repo

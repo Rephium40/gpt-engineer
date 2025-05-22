@@ -48,6 +48,32 @@ Create new code (default usage)
 
     $ gpte projects/my-new-project
 
+Interactive Clarification Mode (`--clarify`)
+-------------------------------------------
+
+If your initial prompt might be unclear or lacks specific details, you can use the ``--clarify`` (or ``-c``) flag to engage in a dialogue with the AI. This mode allows `gpt-engineer` to ask you questions to refine the project specifications before any code is generated.
+
+- Run ``gpte <project_dir> --clarify`` (or ``gpte <project_dir> -c``).
+- For example:
+
+  .. code-block:: console
+
+    $ gpte projects/my-new-project --clarify
+
+How it works:
+
+- If the AI detects ambiguities or needs more information based on your initial ``prompt`` file, it will ask you a question.
+- You provide an answer to the AI's question.
+- The AI may then ask further follow-up questions to resolve other ambiguities, or it will indicate that it's ready to proceed with code generation.
+- This cycle continues for a few turns, or until the AI believes it has enough information.
+
+Control Keywords during Clarification:
+
+- **`done`**: If you think you've provided enough clarification and want the AI to start generating code with the current understanding, type `done` when prompted for an answer.
+- **`quit`** or **`exit`**: If you want to stop the clarification process and terminate the program, type `quit` or `exit`.
+
+The entire conversation history (your initial prompt plus all questions and answers from the dialogue) will be used by the AI to generate the code, leading to a more accurate and tailored result.
+
 Improve Existing Code
 ---------------------
 

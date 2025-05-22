@@ -73,7 +73,7 @@ class AI:
     -------
     start(system: str, user: str, step_name: str) -> List[Message]
         Start the conversation with a system message and a user message.
-    next(messages: List[Message], prompt: Optional[str], step_name: str) -> List[Message]
+    next(messages: List[Message], user_prompt: Optional[str] = None, system_prompt: Optional[str] = None, *, step_name: str) -> List[Message]
         Advances the conversation by sending message history to LLM and updating with the response.
     backoff_inference(messages: List[Message]) -> Any
         Perform inference using the language model with an exponential backoff strategy.
@@ -206,7 +206,8 @@ class AI:
     def next(
         self,
         messages: List[Message],
-        prompt: Optional[str] = None,
+        user_prompt: Optional[str] = None,
+        system_prompt: Optional[str] = None,
         *,
         step_name: str,
     ) -> List[Message]:
@@ -218,8 +219,10 @@ class AI:
         ----------
         messages : List[Message]
             The list of messages in the conversation.
-        prompt : Optional[str], optional
-            The prompt to use, by default None.
+        user_prompt : Optional[str], optional
+            The user prompt to append, by default None.
+        system_prompt : Optional[str], optional
+            The system prompt to append, by default None.
         step_name : str
             The name of the step.
 
@@ -229,8 +232,10 @@ class AI:
             The updated list of messages in the conversation.
         """
 
-        if prompt:
-            messages.append(HumanMessage(content=prompt))
+        if user_prompt:
+            messages.append(HumanMessage(content=user_prompt))
+        if system_prompt:  # Added to handle system prompts for clarification
+            messages.append(SystemMessage(content=system_prompt))
 
         logger.debug(
             "Creating a new chat completion: %s",
@@ -408,15 +413,18 @@ class ClipboardAI(AI):
     def next(
         self,
         messages: List[Message],
-        prompt: Optional[str] = None,
+        user_prompt: Optional[str] = None,
+        system_prompt: Optional[str] = None,
         *,
         step_name: str,
     ) -> List[Message]:
         """
         Not yet fully supported
         """
-        if prompt:
-            messages.append(HumanMessage(content=prompt))
+        if user_prompt:
+            messages.append(HumanMessage(content=user_prompt))
+        if system_prompt:
+            messages.append(SystemMessage(content=system_prompt))
 
         logger.debug(f"Creating a new chat completion: {messages}")
 

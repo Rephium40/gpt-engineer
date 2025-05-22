@@ -61,7 +61,13 @@ from gpt_engineer.core.files_dict import FilesDict
 from gpt_engineer.core.git import stage_uncommitted_to_git
 from gpt_engineer.core.preprompts_holder import PrepromptsHolder
 from gpt_engineer.core.prompt import Prompt
-from gpt_engineer.tools.custom_steps import clarified_gen, lite_gen, self_heal
+from gpt_engineer.tools.custom_steps import (  # clarified_gen will likely be replaced by inline logic
+    clarified_gen,
+    lite_gen,
+    self_heal,
+)
+from langchain.schema import HumanMessage, SystemMessage, AIMessage, BaseMessage
+
 
 app = typer.Typer(
     context_settings={"help_option_names": ["-h", "--help"]}
@@ -480,9 +486,9 @@ def main(
         prompt.image_urls = None
 
     # configure generation function
-    if clarify_mode:
-        code_gen_fn = clarified_gen
-    elif lite_mode:
+    # if clarify_mode: # This will be handled inline now
+    # code_gen_fn = clarified_gen
+    if lite_mode:
         code_gen_fn = lite_gen
     else:
         code_gen_fn = gen_code
@@ -540,9 +546,163 @@ def main(
                     files_dict = files_dict_before
 
         else:
+            if clarify_mode and not improve_mode:  # Ensure clarify_mode is not for --improve
+                # Interactive clarification loop
+                # For preprompts, using placeholders. These would need to be added to `preprompts/`
+                # e.g., clarify_initial_prompt.txt, clarify_next_step_or_ready.txt
+                # Fallback to hardcoded if not found, with a warning.
+                try:
+                    clarify_initial_prompt_text = preprompts_holder.get_preprompt(
+                        "clarify_initial_prompt"
+                    )
+                except FileNotFoundError:
+                    clarify_initial_prompt_text = (
+                        "You are an AI assistant. The user has provided an initial prompt. "
+                        "Review it. If it's clear and actionable for code generation, respond with the exact phrase 'READY_TO_GENERATE'. "
+                        "Otherwise, ask a single, concise question to clarify the most critical ambiguity or missing piece of information. "
+                        "Do not offer to write code yet."
+                    )
+                    print(
+                        colored(
+                            "Warning: Preprompt 'clarify_initial_prompt' not found. Using default.",
+                            "yellow",
+                        )
+                    )
+
+                try:
+                    clarify_next_step_prompt_text = preprompts_holder.get_preprompt(
+                        "clarify_next_step_or_ready"
+                    )
+                except FileNotFoundError:
+                    clarify_next_step_prompt_text = (
+                        "You are an AI assistant. You have been in a dialogue to clarify software requirements. "
+                        "Review the entire conversation. If all critical ambiguities are resolved and you have "
+                        "enough information to generate the code, respond with the exact phrase 'READY_TO_GENERATE'. "
+                        "Otherwise, formulate the *next single most important* clarifying question to ask the user. "
+                        "Do not offer to write code yet."
+                    )
+                    print(
+                        colored(
+                            "Warning: Preprompt 'clarify_next_step_or_ready' not found. Using default.",
+                            "yellow",
+                        )
+                    )
+
+                # Initialize conversation history
+                # The agent.init() usually starts with a system message (philosophy) and the user prompt.
+                # We'll build a similar list of messages here.
+                initial_system_philosophy = preprompts_holder.get_preprompt("philosophy")
+                conversation_history: list[BaseMessage] = [
+                    SystemMessage(content=initial_system_philosophy),
+                    HumanMessage(content=prompt.text),
+                ]
+                if prompt.image_urls: # Add image message if present
+                    image_content = [{"type": "text", "text": "Initial prompt images:"}]
+                    for url_data in prompt.image_urls:
+                        # Assuming url_data is a dict like {'url': 'data:image/jpeg;base64,...'}
+                        # and AI.next can handle this structure for vision models
+                        image_content.append({"type": "image_url", "image_url": url_data})
+                    conversation_history.append(HumanMessage(content=image_content))
+
+
+                print(colored("Entering interactive clarification mode...", "cyan"))
+                max_turns = 7
+                current_turn = 0
+
+                while current_turn < max_turns:
+                    current_turn += 1
+                    print(colored(f"\nClarification Turn {current_turn}/{max_turns}", "magenta"))
+
+                    system_prompt_for_ai = (
+                        clarify_initial_prompt_text
+                        if current_turn == 1
+                        else clarify_next_step_prompt_text
+                    )
+
+                    # Get AI's question or readiness signal
+                    # The AI.next method was modified to accept system_prompt
+                    updated_history_with_ai_response = ai.next(
+                        messages=conversation_history,
+                        system_prompt=system_prompt_for_ai,
+                        step_name=f"clarification_turn_{current_turn}",
+                    )
+                    ai_response_message = updated_history_with_ai_response[-1]
+                    
+                    # Ensure content is string
+                    if isinstance(ai_response_message.content, list):
+                        # For vision models, content can be a list. We need the text part.
+                        ai_response_text = ""
+                        for part in ai_response_message.content:
+                            if part.get("type") == "text":
+                                ai_response_text = part.get("text", "")
+                                break
+                    else:
+                        ai_response_text = str(ai_response_message.content)
+
+
+                    conversation_history = updated_history_with_ai_response
+
+                    if "READY_TO_GENERATE" in ai_response_text:
+                        print(colored("AI is ready to generate code.", "green"))
+                        break
+
+                    print(colored("AI Assistant:", "blue"), ai_response_text)
+                    
+                    user_input = ""
+                    try:
+                        user_input = input(colored("Your answer (or 'done', 'quit'): ", "yellow")).strip()
+                    except EOFError: # Handle Ctrl+D as quit
+                        user_input = "quit"
+
+
+                    if user_input.lower() == "done":
+                        print(colored("Proceeding with generation based on current information.", "green"))
+                        break
+                    if user_input.lower() in ["quit", "exit"]:
+                        print(colored("Exiting application.", "red"))
+                        raise typer.Exit()
+
+                    conversation_history.append(HumanMessage(content=user_input))
+
+                    if current_turn == max_turns:
+                        print(colored("Max clarification turns reached. Proceeding with generation.", "yellow"))
+
+                # Serialize conversation history to a string for the Prompt object
+                # This is a simple serialization. A more structured format might be better.
+                final_prompt_text = f"Original Prompt:\n{prompt.text}\n\nClarification Dialogue:\n"
+                for msg in conversation_history[1:]: # Skip initial system philosophy as agent.init will add it
+                    if isinstance(msg, HumanMessage):
+                        if isinstance(msg.content, list): # Handle image messages
+                            text_parts = [part["text"] for part in msg.content if part["type"] == "text"]
+                            final_prompt_text += f"User (with images): {' '.join(text_parts)}\n"
+                        else:
+                            final_prompt_text += f"User: {msg.content}\n"
+                    elif isinstance(msg, AIMessage):
+                        if isinstance(msg.content, list):
+                             text_parts = [part["text"] for part in msg.content if part["type"] == "text"]
+                             final_prompt_text += f"AI: {' '.join(text_parts)}\n"
+                        else:
+                            final_prompt_text += f"AI: {msg.content}\n"
+                    elif isinstance(msg, SystemMessage) and msg.content != initial_system_philosophy : # Avoid duplicating the initial philosophy
+                        final_prompt_text += f"System: {msg.content}\n"
+
+
+                # Update the prompt object for agent.init()
+                # Retain original image_urls and entrypoint_prompt if they exist
+                prompt = Prompt(
+                    text=final_prompt_text,
+                    image_urls=prompt.image_urls, # Keep original images if any
+                    entrypoint_prompt=prompt.entrypoint_prompt
+                )
+                # The code_gen_fn should be the standard gen_code, as clarification is done.
+                agent.code_gen_fn = gen_code # Override if it was set to clarified_gen
+
             files_dict = agent.init(prompt)
             # collect user feedback if user consents
-            config = (code_gen_fn.__name__, execution_fn.__name__)
+            # Note: config might need adjustment if clarified_gen is no longer used.
+            # For now, assume gen_code is the primary generator after clarification.
+            config_code_gen_fn_name = agent.code_gen_fn.__name__
+            config = (config_code_gen_fn_name, execution_fn.__name__)
             collect_and_send_human_review(prompt, model, temperature, config, memory)
 
         stage_uncommitted_to_git(path, files_dict, improve_mode)

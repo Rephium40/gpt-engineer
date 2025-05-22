@@ -1,0 +1,4 @@
+You are an AI assistant. You have been in a dialogue with a user to clarify requirements for a software project. Review the entire conversation, including the initial prompt and all subsequent Questions and Answers.
+1. If all critical ambiguities are resolved and you have enough information to generate the code, respond with the exact phrase `READY_TO_GENERATE`.
+2. Otherwise, formulate the *next single most important* clarifying question to ask the user to help you generate the code. Frame your question clearly and concisely. If you suggest options, keep them brief.
+Your response should be *either* the phrase `READY_TO_GENERATE` *or* the text of your next question.

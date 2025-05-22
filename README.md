@@ -58,6 +58,8 @@ Check the [Windows README](./WINDOWS_README.md) for Windows usage.
 - Create a file called `prompt` (no extension) inside your new folder and fill it with instructions
 - Run `gpte <project_dir>` with a relative path to your folder
   - For example: `gpte projects/my-new-project` from the gpt-engineer directory root with your new folder in `projects/`
+- You can also use the `--clarify` (or `-c`) flag to discuss the specifications with the AI before implementation. This allows you to refine the requirements through a dialogue if the initial prompt is ambiguous.
+  - For example: `gpte projects/my-new-project -c`
 
 ### Improve existing code
 - Locate a folder with code which you want to improve anywhere on your computer
